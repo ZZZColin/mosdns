@@ -77,9 +77,15 @@ type Opt struct {
 	DialAddr string
 
 	// Socks5 specifies the socks5 proxy server that the upstream
-	// will connect though.
-	// Not implemented for udp based protocols (aka. dns over udp, http3, quic).
-	Socks5 string
+    // will connect though.
+    // Not implemented for udp based protocols (aka. dns over udp, http3, quic).
+    Socks5 string
+
+    // Socks5Username specifies the username for SOCKS5 authentication.
+    Socks5Username string
+
+    // Socks5Password specifies the password for SOCKS5 authentication.
+    Socks5Password string
 
 	// SoMark sets the socket SO_MARK option in unix system.
 	SoMark int
@@ -218,17 +224,38 @@ func NewUpstream(addr string, opt Opt) (_ Upstream, err error) {
 
 		// Socks5 enabled.
 		if s5Addr := opt.Socks5; len(s5Addr) > 0 {
-			socks5Dialer, err := proxy.SOCKS5("tcp", s5Addr, nil, dialer)
-			if err != nil {
-				return nil, fmt.Errorf("failed to init socks5 dialer: %w", err)
-			}
 
-			contextDialer := socks5Dialer.(proxy.ContextDialer)
-			dialAddr := net.JoinHostPort(host, strconv.Itoa(int(port)))
-			return func(ctx context.Context) (net.Conn, error) {
-				return contextDialer.DialContext(ctx, "tcp", dialAddr)
-			}, nil
-		}
+			if (opt.Socks5Username != "") != (opt.Socks5Password != "") {
+                return nil, errors.New("socks5 username and password must be provided together")
+            }
+
+            var auth *proxy.Auth
+
+            if opt.Socks5Username != "" {
+                auth = &proxy.Auth{
+                    User:     opt.Socks5Username,
+                    Password: opt.Socks5Password,
+                }
+            }
+
+            socks5Dialer, err := proxy.SOCKS5(
+                "tcp",
+                s5Addr,
+                auth,
+                dialer,
+            )
+
+            if err != nil {
+                return nil, fmt.Errorf("failed to init socks5 dialer: %w", err)
+            }
+
+            contextDialer := socks5Dialer.(proxy.ContextDialer)
+            dialAddr := net.JoinHostPort(host, strconv.Itoa(int(port)))
+
+            return func(ctx context.Context) (net.Conn, error) {
+                return contextDialer.DialContext(ctx, "tcp", dialAddr)
+            }, nil
+        }
 
 		if _, err := netip.ParseAddr(host); err == nil {
 			// Host is an ip addr. No need to resolve it.
