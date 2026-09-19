@@ -56,31 +56,35 @@ type Args struct {
 	Concurrent int              `yaml:"concurrent"`
 
 	// Global options.
-	Socks5       string `yaml:"socks5"`
-	SoMark       int    `yaml:"so_mark"`
-	BindToDevice string `yaml:"bind_to_device"`
-	Bootstrap    string `yaml:"bootstrap"`
-	BootstrapVer int    `yaml:"bootstrap_version"`
+	Socks5         string `yaml:"socks5"`
+	Socks5Username string `yaml:"socks5_username"`
+    Socks5Password string `yaml:"socks5_password"`
+	SoMark         int    `yaml:"so_mark"`
+	BindToDevice   string `yaml:"bind_to_device"`
+	Bootstrap      string `yaml:"bootstrap"`
+	BootstrapVer   int    `yaml:"bootstrap_version"`
 }
 
 type UpstreamConfig struct {
-	Tag         string `yaml:"tag"`
-	Addr        string `yaml:"addr"` // Required.
-	DialAddr    string `yaml:"dial_addr"`
-	IdleTimeout int    `yaml:"idle_timeout"`
+    Tag         string `yaml:"tag"`
+    Addr        string `yaml:"addr"` // Required.
+    DialAddr    string `yaml:"dial_addr"`
+    IdleTimeout int    `yaml:"idle_timeout"`
 
-	// Deprecated: This option has no affect.
-	// TODO: (v6) Remove this option.
-	MaxConns           int  `yaml:"max_conns"`
-	EnablePipeline     bool `yaml:"enable_pipeline"`
-	EnableHTTP3        bool `yaml:"enable_http3"`
-	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
+    // Deprecated: This option has no affect.
+    // TODO: (v6) Remove this option.
+    MaxConns           int  `yaml:"max_conns"`
+    EnablePipeline     bool `yaml:"enable_pipeline"`
+    EnableHTTP3        bool `yaml:"enable_http3"`
+    InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
 
-	Socks5       string `yaml:"socks5"`
-	SoMark       int    `yaml:"so_mark"`
-	BindToDevice string `yaml:"bind_to_device"`
-	Bootstrap    string `yaml:"bootstrap"`
-	BootstrapVer int    `yaml:"bootstrap_version"`
+    Socks5         string `yaml:"socks5"`
+    Socks5Username string `yaml:"socks5_username"`
+    Socks5Password string `yaml:"socks5_password"`
+    SoMark         int    `yaml:"so_mark"`
+    BindToDevice   string `yaml:"bind_to_device"`
+    Bootstrap      string `yaml:"bootstrap"`
+    BootstrapVer   int    `yaml:"bootstrap_version"`
 }
 
 func Init(bp *coremain.BP, args any) (any, error) {
@@ -128,12 +132,15 @@ func NewForward(args *Args, opt Opts) (*Forward, error) {
 	}
 
 	applyGlobal := func(c *UpstreamConfig) {
-		utils.SetDefaultString(&c.Socks5, args.Socks5)
-		utils.SetDefaultUnsignNum(&c.SoMark, args.SoMark)
-		utils.SetDefaultString(&c.BindToDevice, args.BindToDevice)
-		utils.SetDefaultString(&c.Bootstrap, args.Bootstrap)
-		utils.SetDefaultUnsignNum(&c.BootstrapVer, args.BootstrapVer)
-	}
+        utils.SetDefaultString(&c.Socks5, args.Socks5)
+        utils.SetDefaultString(&c.Socks5Username, args.Socks5Username)
+        utils.SetDefaultString(&c.Socks5Password, args.Socks5Password)
+
+        utils.SetDefaultUnsignNum(&c.SoMark, args.SoMark)
+        utils.SetDefaultString(&c.BindToDevice, args.BindToDevice)
+        utils.SetDefaultString(&c.Bootstrap, args.Bootstrap)
+        utils.SetDefaultUnsignNum(&c.BootstrapVer, args.BootstrapVer)
+    }
 
 	for i, c := range args.Upstreams {
 		if len(c.Addr) == 0 {
@@ -143,19 +150,23 @@ func NewForward(args *Args, opt Opts) (*Forward, error) {
 
 		uw := newWrapper(i, c, opt.MetricsTag)
 		uOpt := upstream.Opt{
-			DialAddr:       c.DialAddr,
-			Socks5:         c.Socks5,
-			SoMark:         c.SoMark,
-			BindToDevice:   c.BindToDevice,
+            DialAddr:       c.DialAddr,
+            Socks5:         c.Socks5,
+            Socks5Username: c.Socks5Username,
+            Socks5Password: c.Socks5Password,
+            SoMark:         c.SoMark,
+            BindToDevice:   c.BindToDevice,
 			IdleTimeout:    time.Duration(c.IdleTimeout) * time.Second,
 			EnablePipeline: c.EnablePipeline,
 			EnableHTTP3:    c.EnableHTTP3,
 			Bootstrap:      c.Bootstrap,
 			BootstrapVer:   c.BootstrapVer,
+			
 			TLSConfig: &tls.Config{
 				InsecureSkipVerify: c.InsecureSkipVerify,
 				ClientSessionCache: tls.NewLRUClientSessionCache(4),
 			},
+			
 			Logger:        opt.Logger,
 			EventObserver: uw,
 		}
