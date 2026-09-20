@@ -27,6 +27,7 @@ import (
 	"github.com/IrineSistiana/mosdns/v5/pkg/qtrace"
 )
 
+// Define plugin name
 const PluginType = "query_log"
 
 func init() {
