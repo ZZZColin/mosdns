@@ -15,6 +15,17 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * ---------------------------------------------------------------------
+ * Modified by ZZZColin to add query tracing hooks (pkg/qtrace).
+ *
+ * Why this file needs its own hooks (unlike most other plugins):
+ * fallback runs its primary and secondary branches concurrently, each on
+ * its own qCtx.Copy(). If the secondary happens to be a plain plugin
+ * (e.g. "forward_remote" referenced directly, not through a sequence),
+ * it never passes through sequence/chain.go's ExecNext, so it would
+ * otherwise be invisible in the query log. All additions are marked
+ * "query_log:".
  */
 
 package fallback
@@ -27,6 +38,7 @@ import (
 
 	"github.com/IrineSistiana/mosdns/v5/coremain"
 	"github.com/IrineSistiana/mosdns/v5/pkg/pool"
+	"github.com/IrineSistiana/mosdns/v5/pkg/qtrace" // query_log: tracing hooks
 	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
 	"github.com/IrineSistiana/mosdns/v5/plugin/executable/sequence"
 	"github.com/miekg/dns"
@@ -45,6 +57,10 @@ func init() {
 }
 
 type fallback struct {
+	tag                  string // query_log: this plugin's own tag, for tracing/logging
+	primaryName          string // query_log: args.Primary, for tracing/logging
+	secondaryName        string // query_log: args.Secondary, for tracing/logging
+
 	logger               *zap.Logger
 	primary              sequence.Executable
 	secondary            sequence.Executable
@@ -88,6 +104,9 @@ func newFallbackPlugin(bp *coremain.BP, args *Args) (*fallback, error) {
 	}
 
 	s := &fallback{
+		tag:                  bp.Tag(),        // query_log
+		primaryName:          args.Primary,    // query_log
+		secondaryName:        args.Secondary,  // query_log
 		logger:               bp.L(),
 		primary:              pe,
 		secondary:            se,
@@ -118,7 +137,12 @@ func (f *fallback) doFallback(ctx context.Context, qCtx *query_context.Context) 
 		qCtx := qCtxP
 		ctx, cancel := makeDdlCtx(ctx, defaultParallelTimeout)
 		defer cancel()
+		start := time.Now()                     // query_log
 		err := f.primary.Exec(ctx, qCtx)
+		// query_log: record this branch even if primaryName is itself a
+		// sequence (whose own internal steps are already traced by
+		// sequence.go) - this line just marks where the fallback picked it.
+		qtrace.RecordStep(qCtx, f.tag, "primary: "+f.primaryName, "branch", false, time.Since(start), err) // query_log
 		if err != nil {
 			f.logger.Warn("primary error", qCtx.InfoField(), zap.Error(err))
 		}
@@ -150,7 +174,9 @@ func (f *fallback) doFallback(ctx context.Context, qCtx *query_context.Context) 
 		qCtx := qCtxS
 		ctx, cancel := makeDdlCtx(ctx, defaultParallelTimeout)
 		defer cancel()
+		start := time.Now() // query_log
 		err := f.secondary.Exec(ctx, qCtx)
+		qtrace.RecordStep(qCtx, f.tag, "secondary: "+f.secondaryName, "branch", false, time.Since(start), err) // query_log
 		if err != nil {
 			f.logger.Warn("secondary error", qCtx.InfoField(), zap.Error(err))
 			respChan <- nil
