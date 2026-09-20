@@ -15,6 +15,11 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * ---------------------------------------------------------------------
+ * Modified by ZZZColin to add query tracing hooks (pkg/qtrace) so a
+ * query_log plugin can show, for every query, which tag/type ran and
+ * what it returned. All additions are marked "query_log:".
  */
 
 package sequence
@@ -23,8 +28,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
 	"io"
+	"time"
+
+	"github.com/IrineSistiana/mosdns/v5/pkg/qtrace" // query_log: tracing hooks
+	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
 )
 
 type ChainNode struct {
@@ -34,12 +42,22 @@ type ChainNode struct {
 	// In case both are set. E is preferred.
 	E  Executable
 	RE RecursiveExecutable
+
+	// query_log: display name for this node, used only for tracing/logging.
+	Name string // plugin tag (if referenced by $tag) or type name
+	Kind string // "tag" or "type"
 }
 
 type ChainWalker struct {
 	p        int
 	chain    []*ChainNode
 	jumpBack *ChainWalker
+
+	// query_log: tag of the Sequence plugin this walker belongs to.
+	// Not part of NewChainWalker's signature so existing external callers
+	// keep compiling; it defaults to "" (still functions, just unlabeled
+	// in the trace) unless the sequence package itself sets it.
+	seqTag string
 }
 
 func NewChainWalker(chain []*ChainNode, jumpBack *ChainWalker) ChainWalker {
@@ -62,6 +80,8 @@ checkMatchesLoop:
 				return err
 			}
 			if !ok {
+				// query_log: record that this node was skipped.
+				qtrace.RecordStep(qCtx, w.seqTag, n.Name, n.Kind, true, 0, nil)
 				// Skip this node if condition was not matched.
 				p++
 				continue checkMatchesLoop
@@ -71,7 +91,10 @@ checkMatchesLoop:
 		// Exec rules' executables in loop, or in stack if it is a recursive executable.
 		switch {
 		case n.E != nil:
-			if err := n.E.Exec(ctx, qCtx); err != nil {
+			start := time.Now() // query_log
+			err := n.E.Exec(ctx, qCtx)
+			qtrace.RecordStep(qCtx, w.seqTag, n.Name, n.Kind, false, time.Since(start), err) // query_log
+			if err != nil {
 				return err
 			}
 			p++
@@ -81,8 +104,12 @@ checkMatchesLoop:
 				p:        p + 1,
 				chain:    w.chain,
 				jumpBack: w.jumpBack,
+				seqTag:   w.seqTag, // query_log: keep the label for the rest of the chain
 			}
-			return n.RE.Exec(ctx, qCtx, next)
+			start := time.Now()                                                            // query_log
+			err := n.RE.Exec(ctx, qCtx, next)                                               // query_log: note this may also run the remainder of the chain
+			qtrace.RecordStep(qCtx, w.seqTag, n.Name, n.Kind, false, time.Since(start), err) // query_log
+			return err
 		default:
 			panic("n cannot be executed")
 		}
@@ -132,6 +159,16 @@ func (s *Sequence) newNode(bq BQ, r RuleConfig, ri int) (*ChainNode, error) {
 	}
 	n.E = e
 	n.RE = re
+
+	// query_log: remember how this node was referenced, for display only.
+	if len(r.Tag) > 0 {
+		n.Name = r.Tag
+		n.Kind = "tag"
+	} else {
+		n.Name = r.Type
+		n.Kind = "type"
+	}
+
 	return n, nil
 }
 

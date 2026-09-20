@@ -15,13 +15,20 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * ---------------------------------------------------------------------
+ * Modified by ZZZColin to add query tracing hooks (pkg/qtrace) so a
+ * query_log plugin can show, for every query, which tag/type ran and
+ * what it returned. All additions are marked "query_log:".
  */
 
 package sequence
 
 import (
 	"context"
+
 	"github.com/IrineSistiana/mosdns/v5/coremain"
+	"github.com/IrineSistiana/mosdns/v5/pkg/qtrace" // query_log: tracing hooks
 	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
 )
 
@@ -40,6 +47,8 @@ func init() {
 }
 
 type Sequence struct {
+	tag string // query_log: this Sequence plugin's own tag, used only for tracing/logging.
+
 	chain            []*ChainNode
 	anonymousPlugins []any
 }
@@ -54,7 +63,12 @@ func (s *Sequence) Close() error {
 type Args = []RuleArgs
 
 func Init(bp *coremain.BP, args any) (any, error) {
-	return NewSequence(bp, *args.(*Args))
+	s, err := NewSequence(bp, *args.(*Args))
+	if err != nil {
+		return nil, err
+	}
+	s.tag = bp.Tag() // query_log: capture the tag this sequence is registered under
+	return s, nil
 }
 
 func NewSequence(bq BQ, ra []RuleArgs) (*Sequence, error) {
@@ -72,6 +86,15 @@ func NewSequence(bq BQ, ra []RuleArgs) (*Sequence, error) {
 }
 
 func (s *Sequence) Exec(ctx context.Context, qCtx *query_context.Context) error {
+	// query_log: mark entry/exit of this sequence so nested $tag calls to
+	// other sequences (e.g. a fallback's primary/secondary) show up
+	// correctly nested in the trace. This is a no-op unless a query_log
+	// plugin has been configured.
+	if qtrace.EnterSeq(qCtx, s.tag) {
+		defer qtrace.LeaveSeq(qCtx)
+	}
+
 	walker := NewChainWalker(s.chain, nil)
+	walker.seqTag = s.tag // query_log
 	return walker.ExecNext(ctx, qCtx)
 }
