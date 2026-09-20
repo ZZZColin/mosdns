@@ -14,9 +14,13 @@
 //	  args:
 //	    listen: "0.0.0.0:9092"
 //	    max_records: 300
+//	    username: "admin"      # optional, leave both blank to disable auth
+//	    password: "change-me"  # optional
 package query_log
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -27,7 +31,6 @@ import (
 	"github.com/IrineSistiana/mosdns/v5/pkg/qtrace"
 )
 
-// Define plugin name
 const PluginType = "query_log"
 
 func init() {
@@ -42,6 +45,12 @@ type Args struct {
 	// MaxRecords is how many recent queries are kept in memory.
 	// Default 200.
 	MaxRecords int `yaml:"max_records"`
+
+	// Username and Password, if either is set, protect the web page and
+	// its API with HTTP Basic Auth. Leave both empty to disable auth
+	// (not recommended if listen is reachable from outside your LAN).
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
 
 type QueryLog struct {
@@ -73,7 +82,15 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		handleAPIRecords(w, r, rec)
 	})
 
-	srv := &http.Server{Handler: mux}
+	var handler http.Handler = mux
+	if len(a.Username) > 0 || len(a.Password) > 0 {
+		handler = basicAuth(a.Username, a.Password, mux)
+		bp.L().Sugar().Info("query_log: web ui is protected with basic auth")
+	} else {
+		bp.L().Sugar().Warn("query_log: web ui has no username/password set, anyone who can reach the listen address can read it")
+	}
+
+	srv := &http.Server{Handler: handler}
 	q := &QueryLog{rec: rec, srv: srv, ln: ln}
 
 	go func() {
@@ -89,6 +106,30 @@ func Init(bp *coremain.BP, args any) (any, error) {
 func (q *QueryLog) Close() error {
 	qtrace.ClearGlobalRecorder(q.rec)
 	return q.srv.Close()
+}
+
+// basicAuth wraps next with HTTP Basic Auth. Credentials are compared as
+// SHA-256 hashes with subtle.ConstantTimeCompare so the check does not leak
+// timing information about how much of the guess was correct.
+func basicAuth(username, password string, next http.Handler) http.Handler {
+	wantUser := sha256.Sum256([]byte(username))
+	wantPass := sha256.Sum256([]byte(password))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if ok {
+			gotUser := sha256.Sum256([]byte(u))
+			gotPass := sha256.Sum256([]byte(p))
+			userOK := subtle.ConstantTimeCompare(gotUser[:], wantUser[:]) == 1
+			passOK := subtle.ConstantTimeCompare(gotPass[:], wantPass[:]) == 1
+			if userOK && passOK {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="mosdns query_log", charset="UTF-8"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	})
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
