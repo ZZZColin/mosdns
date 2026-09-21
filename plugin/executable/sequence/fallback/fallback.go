@@ -218,5 +218,5 @@ func makeDdlCtx(ctx context.Context, timeout time.Duration) (context.Context, fu
 	if !ok {
 		ddl = time.Now().Add(timeout)
 	}
-	return context.WithDeadline(context.Background(), ddl)
+	return context.WithDeadline(ctx, ddl)
 }
