@@ -28,37 +28,37 @@ import (
 	"github.com/miekg/dns"
 	"github.com/nadoo/ipset"
 	"net/netip"
+	"go.uber.org/zap"
 )
 
 type ipSetPlugin struct {
-	args *Args
-	nl   *ipset.NetLink
+	args   *Args
+	nl     *ipset.NetLink
+	logger *zap.Logger
 }
 
-func newIpSetPlugin(args *Args) (*ipSetPlugin, error) {
+func newIpSetPlugin(args *Args, logger *zap.Logger) (*ipSetPlugin, error) {
 	if args.Mask4 == 0 {
 		args.Mask4 = 24
 	}
 	if args.Mask6 == 0 {
 		args.Mask6 = 32
 	}
-
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	nl, err := ipset.Init()
 	if err != nil {
 		return nil, err
 	}
-
-	return &ipSetPlugin{
-		args: args,
-		nl:   nl,
-	}, nil
+	return &ipSetPlugin{args: args, nl: nl, logger: logger}, nil
 }
 
 func (p *ipSetPlugin) Exec(_ context.Context, qCtx *query_context.Context) error {
 	r := qCtx.R()
 	if r != nil {
 		if err := p.addIPSet(r); err != nil {
-			return fmt.Errorf("ipset: %w", err)
+			p.logger.Warn("failed to add ipset entry", zap.Error(err))
 		}
 	}
 	return nil
