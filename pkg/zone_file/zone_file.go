@@ -78,7 +78,9 @@ func (m *Matcher) Reply(q *dns.Msg) *dns.Msg {
 				r = new(dns.Msg)
 				r.SetReply(q)
 			}
-			r.Answer = append(r.Answer, rr...)
+			for _, e := range rr {
+				r.Answer = append(r.Answer, dns.Copy(e))
+			}
 		}
 	}
 	return r
