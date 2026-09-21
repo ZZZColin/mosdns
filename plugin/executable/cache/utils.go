@@ -67,7 +67,7 @@ func getMsgKey(q *dns.Msg) string {
 		b = b | doBit
 	}
 	buf[0] = b
-	buf[1] = byte(question.Qtype << 8)
+	buf[1] = byte(question.Qtype >> 8)
 	buf[2] = byte(question.Qtype)
 	buf[3] = byte(len(question.Name))
 	copy(buf[4:], question.Name)
