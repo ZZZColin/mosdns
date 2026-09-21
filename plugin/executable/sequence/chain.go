@@ -106,9 +106,19 @@ checkMatchesLoop:
 				jumpBack: w.jumpBack,
 				seqTag:   w.seqTag, // query_log: keep the label for the rest of the chain
 			}
-			start := time.Now()                                                            // query_log
-			err := n.RE.Exec(ctx, qCtx, next)                                               // query_log: note this may also run the remainder of the chain
-			qtrace.RecordStep(qCtx, w.seqTag, n.Name, n.Kind, false, time.Since(start), err) // query_log
+			// query_log: use RecordStepStart/RecordStepFinish instead of a
+			// single RecordStep call after Exec returns. RecursiveExecutable
+			// nodes (jump/goto/ecs_handler/cache/dual_selector) call
+			// next.ExecNext() themselves before returning, so a "record after
+			// Exec returns" call would append this node's step AFTER every
+			// step it triggered downstream. Reserving the slot up front with
+			// RecordStepStart keeps the trace in the order things actually
+			// happened. Elapsed time here still includes all downstream
+			// execution time; see the doc comment on RecordStepStart.
+			idx := qtrace.RecordStepStart(qCtx, w.seqTag, n.Name, n.Kind)
+			start := time.Now()
+			err := n.RE.Exec(ctx, qCtx, next)
+			qtrace.RecordStepFinish(qCtx, idx, time.Since(start), err)
 			return err
 		default:
 			panic("n cannot be executed")
