@@ -131,11 +131,11 @@ func GenEmptyReply(q *dns.Msg, rcode int) *dns.Msg {
 	r.SetRcode(q, rcode)
 
 	var name string
-	if len(q.Question) > 1 {
-		name = q.Question[0].Name
-	} else {
-		name = "."
-	}
+    if len(q.Question) > 0 {
+	    name = q.Question[0].Name
+    } else {
+	    name = "."
+    }
 
 	r.Ns = []dns.RR{FakeSOA(name)}
 	return r
