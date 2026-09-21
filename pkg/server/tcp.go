@@ -72,6 +72,19 @@ func ServeTCP(l net.Listener, h Handler, opts TCPServerOpts) error {
 		// handle connection
 		tcpConnCtx, cancelConn := context.WithCancelCause(listenerCtx)
 		go func() {
+			// Modified by ZZZColin: recover from panics in the per-
+			// connection read loop. Without this, a panic here (or one
+			// that bubbles up from the per-query goroutine below through
+			// something other than h.Handle) would crash the whole
+			// process, not just this connection.
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("panic in tcp connection handler",
+						zap.Stringer("client", c.RemoteAddr()),
+						zap.Any("panic", r),
+					)
+				}
+			}()
 			defer c.Close()
 			defer cancelConn(errConnectionCtxCanceled)
 
@@ -96,6 +109,23 @@ func ServeTCP(l net.Listener, h Handler, opts TCPServerOpts) error {
 
 				// handle query
 				go func() {
+					// Modified by ZZZColin: recover from panics while
+					// running the plugin chain (h.Handle). This goroutine
+					// has no caller to propagate an error to, so an
+					// unrecovered panic here is fatal to the entire
+					// process: it takes down every listener (UDP/TCP/
+					// DoH/DoQ), not just this connection. Recovering
+					// keeps a single bad query from becoming a total
+					// outage; it just fails this one query instead.
+					defer func() {
+						if r := recover(); r != nil {
+							logger.Error("panic while handling tcp query",
+								zap.Stringer("client", c.RemoteAddr()),
+								zap.Any("panic", r),
+							)
+						}
+					}()
+
 					var clientAddr netip.Addr
 					ta, ok := c.RemoteAddr().(*net.TCPAddr)
 					if ok {

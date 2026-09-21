@@ -66,6 +66,17 @@ func ServeDoQ(l *quic.Listener, h Handler, opts DoQServerOpts) error {
 		// handle connection
 		connCtx, cancelConn := context.WithCancelCause(listenerCtx)
 		go func() {
+			// Modified by ZZZColin: recover from panics in the per-
+			// connection stream-accept loop, so a bug here can't crash
+			// the whole process, only this one QUIC connection.
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("panic in doq connection handler",
+						zap.Stringer("client", c.RemoteAddr()),
+						zap.Any("panic", r),
+					)
+				}
+			}()
 			defer c.CloseWithError(0, "")
 			defer cancelConn(errConnectionCtxCanceled)
 
@@ -97,6 +108,24 @@ func ServeDoQ(l *quic.Listener, h Handler, opts DoQServerOpts) error {
 					defer func() {
 						stream.Close()
 						stream.CancelRead(0) // TODO: Needs a proper error code.
+					}()
+					// Modified by ZZZColin: recover from panics while
+					// running the plugin chain (h.Handle). This goroutine
+					// has no caller to propagate an error to, so an
+					// unrecovered panic here is fatal to the entire
+					// process: it takes down every listener (UDP/TCP/
+					// DoH/DoQ), not just this stream. Recovering keeps a
+					// single bad query from becoming a total outage; it
+					// just fails this one query instead. The stream-close
+					// defer above still runs after this recovers, same as
+					// on any other return path.
+					defer func() {
+						if r := recover(); r != nil {
+							logger.Error("panic while handling doq query",
+								zap.Stringer("client", c.RemoteAddr()),
+								zap.Any("panic", r),
+							)
+						}
 					}()
 					// Avoid fragmentation attack.
 					stream.SetReadDeadline(time.Now().Add(streamReadTimeout))

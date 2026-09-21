@@ -88,6 +88,23 @@ func ServeUDP(c *net.UDPConn, h Handler, opts UDPServerOpts) error {
 
 		// handle query
 		go func() {
+			// Modified by ZZZColin: recover from panics in the query
+			// handling pipeline (h.Handle runs the whole plugin chain,
+			// including third-party/custom plugins). This goroutine has
+			// no caller to propagate an error to, so an unrecovered
+			// panic here is fatal to the entire process: it takes down
+			// every listener (UDP/TCP/DoH/DoQ), not just this one query.
+			// Recovering keeps a single bad query from becoming a total
+			// outage; it just fails this one query instead.
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("panic while handling udp query",
+						zap.Stringer("client", remoteAddr),
+						zap.Any("panic", r),
+					)
+				}
+			}()
+
 			payload := h.Handle(listenerCtx, q, QueryMeta{ClientAddr: remoteAddr.Addr(), FromUDP: true}, pool.PackBuffer)
 			if payload == nil {
 				return
