@@ -15,6 +15,12 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * ---------------------------------------------------------------------
+ * Modified by ZZZColin: ActionJump.Exec / ActionGoto.Exec now propagate
+ * the caller's ChainWalker.seqTag onto the new walker they build, so
+ * jump/goto targets keep the right "seq" label in the query_log trace
+ * (pkg/qtrace) instead of showing up with an empty one.
  */
 
 package sequence
@@ -88,6 +94,7 @@ type ActionJump struct {
 
 func (a *ActionJump) Exec(ctx context.Context, qCtx *query_context.Context, next ChainWalker) error {
 	w := NewChainWalker(a.To, &next)
+	w.seqTag = next.seqTag // query_log: keep the caller's seq label
 	return w.ExecNext(ctx, qCtx)
 }
 
@@ -105,8 +112,9 @@ type ActionGoto struct {
 	To []*ChainNode
 }
 
-func (a ActionGoto) Exec(ctx context.Context, qCtx *query_context.Context, _ ChainWalker) error {
+func (a ActionGoto) Exec(ctx context.Context, qCtx *query_context.Context, cur ChainWalker) error {
 	w := NewChainWalker(a.To, nil)
+	w.seqTag = cur.seqTag // query_log: keep the caller's seq label
 	return w.ExecNext(ctx, qCtx)
 }
 
