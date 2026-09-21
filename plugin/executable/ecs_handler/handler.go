@@ -147,10 +147,10 @@ func (e *ECSHandler) addECS(qCtx *query_context.Context) (forwarded bool) {
 		clientAddr := e.preset
 		var ecs *dns.EDNS0_SUBNET
 		if clientAddr.Is4() {
-			ecs = newSubnet(clientAddr.AsSlice(), uint8(e.args.Mask4), false)
-		} else {
-			ecs = newSubnet(clientAddr.AsSlice(), uint8(e.args.Mask6), true)
-		}
+	        ecs = newSubnet(clientAddr, uint8(e.args.Mask4), false)
+        } else {
+	        ecs = newSubnet(clientAddr, uint8(e.args.Mask6), true)
+        }
 		queryOpt.Option = append(queryOpt.Option, ecs)
 		return false
 	}
@@ -161,10 +161,10 @@ func (e *ECSHandler) addECS(qCtx *query_context.Context) (forwarded bool) {
 			clientAddr = clientAddr.Unmap()
 			var ecs *dns.EDNS0_SUBNET
 			if clientAddr.Is4() {
-				ecs = newSubnet(clientAddr.AsSlice(), uint8(e.args.Mask4), false)
-			} else {
-				ecs = newSubnet(clientAddr.AsSlice(), uint8(e.args.Mask6), true)
-			}
+	            ecs = newSubnet(clientAddr, uint8(e.args.Mask4), false)
+            } else {
+	            ecs = newSubnet(clientAddr, uint8(e.args.Mask6), true)
+            }
 			queryOpt.Option = append(queryOpt.Option, ecs)
 			return false
 		}
@@ -172,25 +172,17 @@ func (e *ECSHandler) addECS(qCtx *query_context.Context) (forwarded bool) {
 	return false
 }
 
-func newSubnet(ip net.IP, mask uint8, v6 bool) *dns.EDNS0_SUBNET {
+func newSubnet(addr netip.Addr, mask uint8, v6 bool) *dns.EDNS0_SUBNET {
+	masked := netip.PrefixFrom(addr, int(mask)).Masked().Addr()
 	edns0Subnet := new(dns.EDNS0_SUBNET)
-	// edns family: https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
-	// ipv4 = 1
-	// ipv6 = 2
-	if !v6 { // ipv4
+	if !v6 {
 		edns0Subnet.Family = 1
-	} else { // ipv6
+	} else {
 		edns0Subnet.Family = 2
 	}
-
 	edns0Subnet.SourceNetmask = mask
 	edns0Subnet.Code = dns.EDNS0SUBNET
-	edns0Subnet.Address = ip
-
-	// SCOPE PREFIX-LENGTH, an unsigned octet representing the leftmost
-	// number of significant bits of ADDRESS that the response covers.
-	// In queries, it MUST be set to 0.
-	// https://tools.ietf.org/html/rfc7871
+	edns0Subnet.Address = masked.AsSlice()
 	edns0Subnet.SourceScope = 0
 	return edns0Subnet
 }
