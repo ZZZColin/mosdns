@@ -280,7 +280,7 @@ func (f *Forward) exchange(ctx context.Context, qCtx *query_context.Context, us 
 		go func(uqid uint32, question dns.Question) {
 			defer pool.ReleaseBuf(qc)
 			// Give each upstream a fixed timeout to finish the query.
-			upstreamCtx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+			upstreamCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 			defer cancel()
 
 			var r *dns.Msg
