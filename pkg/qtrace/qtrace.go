@@ -29,6 +29,12 @@ type Step struct {
 	Rcode     string        `json:"rcode"`            // response rcode right after this step ran, if any
 	Answer    string        `json:"answer,omitempty"` // brief answer summary right after this step ran
 	Err       string        `json:"err,omitempty"`    // error returned by this step, if any
+
+	// Children holds everything a concurrent branch recorded about
+	// itself (see BeginBranch/EndBranch/RecordBranchStep below), nested
+	// under the branch's own marker step instead of being spliced into
+	// the parent's Steps list. Empty/omitted for ordinary steps.
+	Children []Step `json:"children,omitempty"`
 }
 
 // Record is the full trace of one finished query.
@@ -151,10 +157,22 @@ func activeRecorder() *Recorder {
 // kv map (see depthKey below); query_context.Context.CopyTo's copyMap
 // gives every qCtx.Copy() its own independent map, so a plain int value
 // re-stored there is naturally per-branch instead of shared.
+//
+// The same problem exists one level up: even with depth fixed, two
+// concurrent branches calling RecordStep still append into the SAME
+// s.rec.Steps slice, so their steps interleave in whatever order the two
+// goroutines happen to acquire state.mu - not in any order that reflects
+// which branch a step actually belongs to. sinkKey (see BeginBranch/
+// EndBranch below) fixes this the same way depthKey fixes depth: each
+// branch gets its own private, per-qCtx-copy slice to append into, and
+// only the finished branch's own marker step (via RecordBranchStep) is
+// spliced into the shared s.rec.Steps, once, as a single atomic append
+// with everything the branch recorded attached as Children.
 // ---------------------------------------------------------------------
 
 var stateKey = query_context.RegKey()
 var depthKey = query_context.RegKey()
+var sinkKey = query_context.RegKey()
 
 type state struct {
 	mu   sync.Mutex
@@ -207,6 +225,53 @@ func getDepth(qCtx *query_context.Context) int {
 
 func setDepth(qCtx *query_context.Context, d int) {
 	qCtx.StoreValue(depthKey, d)
+}
+
+// currentSink returns whatever step slice new steps on qCtx should be
+// appended to right now: a branch-private one if BeginBranch installed
+// one on qCtx (or on whatever qCtx this one was itself Copy()'d from,
+// since CopyTo carries the same pointer forward), or the query's shared
+// s.rec.Steps otherwise.
+func currentSink(qCtx *query_context.Context, s *state) *[]Step {
+	if v, ok := qCtx.GetValue(sinkKey); ok {
+		return v.(*[]Step)
+	}
+	return &s.rec.Steps
+}
+
+// BeginBranch installs a private step buffer on qCtx. Call it on a
+// qCtx.Copy() right before handing that copy to one goroutine of a
+// concurrent branch (fallback's primary/secondary, dual_selector's two
+// lookups, ...). Every RecordStep/RecordStepStart/RecordBranchStep call
+// made on that qCtx - or reached through it, however deep - appends into
+// this private buffer instead of the shared Record.Steps, so concurrent
+// branches never contend for, or interleave into, the same slice.
+//
+// No-op if tracing is inactive (no query_log plugin configured).
+func BeginBranch(qCtx *query_context.Context) {
+	if activeRecorder() == nil {
+		return
+	}
+	buf := make([]Step, 0, 4)
+	qCtx.StoreValue(sinkKey, &buf)
+}
+
+// EndBranch removes the private buffer BeginBranch installed on qCtx and
+// returns everything the branch recorded into it. Pass the result to
+// RecordBranchStep as that branch's Children.
+//
+// After EndBranch, further RecordStep-family calls on this same qCtx
+// fall back to writing straight into the shared Record.Steps (state
+// itself, unlike depth or the branch sink, is shared/aliased across
+// every qCtx.Copy() of a query), which is exactly what RecordBranchStep
+// relies on to splice the branch's marker step into its parent's list.
+func EndBranch(qCtx *query_context.Context) []Step {
+	v, ok := qCtx.GetValue(sinkKey)
+	if !ok {
+		return nil
+	}
+	qCtx.DeleteValue(sinkKey)
+	return *(v.(*[]Step))
 }
 
 // EnterSeq must be called at the start of a Sequence's Exec.
@@ -296,17 +361,112 @@ func RecordStep(qCtx *query_context.Context, seqTag, name, kind string, skipped 
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.done {
-		return
-	}
 	depth := getDepth(qCtx) - 1
 	if depth < 0 {
 		depth = 0
 	}
 	st.Depth = depth
-	s.rec.Steps = append(s.rec.Steps, st)
+
+	sink := currentSink(qCtx, s)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done {
+		return
+	}
+	*sink = append(*sink, st)
+}
+
+// BranchOrigin captures everything a later RecordBranchStep call needs -
+// the query's shared *state, which sink to splice into, and the depth
+// the marker step should carry - resolved ONCE, synchronously, from a
+// qCtx you currently have exclusive access to (in practice: the shared
+// parent qCtx, resolved via NewBranchOrigin before spawning any
+// goroutines that race against each other to decide who reports last).
+//
+// This exists because qCtx itself is NOT safe for concurrent use (its
+// own doc comment says so), and a naive "pass the shared parent qCtx to
+// whichever goroutine finishes last, and have it call qCtx.GetValue(...)
+// then" is exactly the bug this type prevents: if the main call stack
+// returns from this plugin's Exec before both branches have reported in
+// (very much the common case - e.g. fallback's primary already
+// succeeded and secondary never even ran), the enclosing Sequence.Exec's
+// deferred qtrace.LeaveSeq(qCtx) writes to that SAME qCtx's kv map
+// (via setDepth) with no synchronization against a background branch
+// goroutine concurrently reading it via getDepth/currentSink - a real,
+// frequently-hit "concurrent map read and map write" crash, not just a
+// -race finding.
+//
+// BranchOrigin has no such problem: once created, it never touches any
+// qCtx again. s is a pointer guarded by its own mutex, sink is a pointer
+// to a slice variable also only ever mutated under that mutex, and depth
+// is a plain int copied by value - none of that requires touching a
+// qCtx's kv map, so RecordBranchStep is safe to call from any goroutine,
+// at any time, no matter what the qCtx it was resolved from is doing
+// concurrently by then.
+type BranchOrigin struct {
+	s     *state
+	sink  *[]Step
+	depth int
+}
+
+// NewBranchOrigin resolves a BranchOrigin from qCtx. Call it exactly
+// once, synchronously, before spawning any goroutines that will
+// eventually call RecordBranchStep - see the type's doc comment for why
+// that ordering matters. The zero BranchOrigin (returned when tracing is
+// inactive) is valid to use; RecordBranchStep on it is simply a no-op.
+func NewBranchOrigin(qCtx *query_context.Context) BranchOrigin {
+	s := getState(qCtx)
+	if s == nil {
+		return BranchOrigin{}
+	}
+	depth := getDepth(qCtx) - 1
+	if depth < 0 {
+		depth = 0
+	}
+	return BranchOrigin{s: s, sink: currentSink(qCtx, s), depth: depth}
+}
+
+// RecordBranchStep records a marker step for one branch of a concurrent
+// operation - fallback's primary/secondary, dual_selector's reference
+// check vs. original query - with everything that branch itself recorded
+// (via BeginBranch/EndBranch) attached as Children instead of being
+// spliced flat into the parent's Steps list.
+//
+// resp is the branch's own response (its qCtx.R(), read by the caller on
+// that branch's own, exclusively-owned qCtx - never through o), or nil.
+// Passing it in rather than having RecordBranchStep fetch it avoids the
+// same class of cross-goroutine qCtx access BranchOrigin exists to
+// avoid, and also avoids a subtler correctness bug: fetching the
+// response from a single shared qCtx at flush time would show whichever
+// branch's response happened to be set there by then for BOTH branches'
+// markers, not each branch's own actual result.
+func (o BranchOrigin) RecordBranchStep(seqTag, name, kind string, elapsed time.Duration, resp *dns.Msg, err error, children []Step) {
+	if o.s == nil {
+		return
+	}
+
+	st := Step{
+		Seq:       seqTag,
+		Name:      name,
+		Kind:      kind,
+		Elapsed:   elapsed,
+		ElapsedMS: ms(elapsed),
+		Children:  children,
+		Depth:     o.depth,
+	}
+	if err != nil {
+		st.Err = err.Error()
+	} else if resp != nil {
+		st.Rcode = rcodeString(resp.Rcode)
+		st.Answer = summarizeAnswer(resp)
+	}
+
+	o.s.mu.Lock()
+	defer o.s.mu.Unlock()
+	if o.s.done {
+		return
+	}
+	*o.sink = append(*o.sink, st)
 }
 
 // RecordStepStart appends a placeholder step for a RecursiveExecutable
@@ -328,6 +488,13 @@ func RecordStep(qCtx *query_context.Context, seqTag, name, kind string, skipped 
 // every RecursiveExecutable implementation to report its own vs.
 // downstream time itself.
 //
+// The returned index is relative to whatever sink is active on qCtx at
+// call time (the branch-private one if BeginBranch is active, otherwise
+// the shared Record.Steps); RecordStepFinish must be called on the same
+// qCtx before anything changes that sink (in practice: before any nested
+// BeginBranch on this exact qCtx, which normal chain execution never
+// does - BeginBranch is only ever called on a qCtx.Copy()).
+//
 // A negative returned index means tracing is inactive; pass it to
 // RecordStepFinish unchanged, which will then no-op.
 func RecordStepStart(qCtx *query_context.Context, seqTag, name, kind string) int {
@@ -339,13 +506,14 @@ func RecordStepStart(qCtx *query_context.Context, seqTag, name, kind string) int
 	if depth < 0 {
 		depth = 0
 	}
+	sink := currentSink(qCtx, s)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.done {
 		return -1
 	}
-	s.rec.Steps = append(s.rec.Steps, Step{Seq: seqTag, Name: name, Kind: kind, Depth: depth})
-	return len(s.rec.Steps) - 1
+	*sink = append(*sink, Step{Seq: seqTag, Name: name, Kind: kind, Depth: depth})
+	return len(*sink) - 1
 }
 
 // RecordStepFinish fills in the outcome of a step previously created by
@@ -358,12 +526,13 @@ func RecordStepFinish(qCtx *query_context.Context, idx int, elapsed time.Duratio
 	if s == nil {
 		return
 	}
+	sink := currentSink(qCtx, s)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.done || idx >= len(s.rec.Steps) {
+	if s.done || idx >= len(*sink) {
 		return
 	}
-	st := &s.rec.Steps[idx]
+	st := &(*sink)[idx]
 	st.Elapsed = elapsed
 	st.ElapsedMS = ms(elapsed)
 	if err != nil {
