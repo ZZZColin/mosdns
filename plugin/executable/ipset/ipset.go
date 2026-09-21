@@ -62,9 +62,15 @@ func QuickSetup(bq sequence.BQ, s string) (any, error) {
 		}
 		switch ss[1] {
 		case "inet":
+			if m < 0 || m > 32 {
+				return nil, fmt.Errorf("invalid mask %d for inet, must be 0-32", m)
+			}
 			args.Mask4 = m
 			args.SetName4 = ss[0]
 		case "inet6":
+			if m < 0 || m > 128 {
+				return nil, fmt.Errorf("invalid mask %d for inet6, must be 0-128", m)
+			}
 			args.Mask6 = m
 			args.SetName6 = ss[0]
 		default:
