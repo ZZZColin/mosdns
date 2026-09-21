@@ -16,6 +16,7 @@
 //	    max_records: 300
 //	    username: "admin"      # optional, leave both blank to disable auth
 //	    password: "change-me"  # optional
+//	    hide_client_ip: false  # optional, set true to omit client IPs from records
 package query_log
 
 import (
@@ -51,6 +52,11 @@ type Args struct {
 	// (not recommended if listen is reachable from outside your LAN).
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+
+	// HideClientIP omits the querying client's IP from every record, so
+	// /api/records and the web page never expose which device queried
+	// which domain. Default false.
+	HideClientIP bool `yaml:"hide_client_ip"`
 }
 
 type QueryLog struct {
@@ -65,7 +71,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		a.Listen = ":9092"
 	}
 
-	rec := qtrace.NewRecorder(a.MaxRecords)
+	rec := qtrace.NewRecorder(a.MaxRecords, a.HideClientIP)
 	if !qtrace.SetGlobalRecorder(rec) {
 		return nil, fmt.Errorf("query_log: a query_log plugin is already running, only one instance is supported")
 	}
