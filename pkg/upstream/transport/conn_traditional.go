@@ -244,7 +244,23 @@ func (dc *TraditionalDnsConn) queueLen() int {
 // It returns a nil c if queue has too many queries.
 // Caller must call deleteQueueC to release the qid in queue.
 func (dc *TraditionalDnsConn) addQueueC() (qid uint16, c chan *[]byte) {
-	c = make(chan *[]byte)
+	// Modified by ZZZColin: buffer this channel with size 1.
+	//
+	// readLoop() below delivers a reply with a non-blocking send
+	// (select/default), which only succeeds if a receiver is ready to
+	// take the value at that exact instant. With an UNBUFFERED channel,
+	// that is only true while exchange() is parked inside its own
+	// "wait:" select. For UDP connections, exchange() briefly leaves
+	// that select once a second to run the resend ticker's writeQuery()
+	// call; if the real reply from the upstream arrives during that
+	// narrow window, the non-blocking send above would hit "default"
+	// and pool.ReleaseBuf(r) would silently discard a legitimate,
+	// already-received response, forcing an avoidable extra round trip
+	// (or a timeout). Giving the channel a buffer of 1 makes the send
+	// succeed unconditionally (matching how reuse.go's respChan is
+	// already buffered), so a reply is never dropped just because the
+	// caller wasn't mid-receive at that instant.
+	c = make(chan *[]byte, 1)
 	dc.queueMu.Lock()
 	for i := 0; i < 100; i++ {
 		qid = dc.nextQid
