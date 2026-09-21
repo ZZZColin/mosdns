@@ -24,6 +24,7 @@ package ipset
 import (
 	"context"
 	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
+	"go.uber.org/zap"
 )
 
 type ipSetPlugin struct{}
