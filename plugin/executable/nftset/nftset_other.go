@@ -25,11 +25,12 @@ package nftset
 import (
 	"context"
 	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
+	"go.uber.org/zap"
 )
 
 type nftSetPlugin struct{}
 
-func newNftSetPlugin(args *Args) (*nftSetPlugin, error) {
+func newNftSetPlugin(args *Args, _ *zap.Logger) (*nftSetPlugin, error) {
 	return &nftSetPlugin{}, nil
 }
 
