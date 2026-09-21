@@ -20,6 +20,13 @@
  * Modified by ZZZColin to add query tracing hooks (pkg/qtrace) so a
  * query_log plugin can show, for every query, which tag/type ran and
  * what it returned. All additions are marked "query_log:".
+ *
+ * Added SeqTag(), an exported accessor for the otherwise-private
+ * seqTag field, so RecursiveExecutable implementations that spawn their
+ * own concurrent branches (e.g. dual_selector) can label the
+ * branch-marker steps they record via qtrace.BeginBranch/EndBranch/
+ * RecordBranchStep with the right sequence tag, instead of leaving them
+ * blank.
  */
 
 package sequence
@@ -58,6 +65,16 @@ type ChainWalker struct {
 	// keep compiling; it defaults to "" (still functions, just unlabeled
 	// in the trace) unless the sequence package itself sets it.
 	seqTag string
+}
+
+// SeqTag returns the tag of the Sequence plugin this walker belongs to,
+// or "" if none was set (tracing inactive, or this walker predates the
+// query_log patch reaching whoever constructed it). query_log:
+// RecursiveExecutable implementations that fan out into their own
+// concurrent branches use this to label branch-marker steps they record
+// themselves; see dual_selector.go for an example.
+func (w ChainWalker) SeqTag() string {
+	return w.seqTag
 }
 
 func NewChainWalker(chain []*ChainNode, jumpBack *ChainWalker) ChainWalker {
