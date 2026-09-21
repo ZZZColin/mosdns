@@ -23,6 +23,7 @@ import (
 	"context"
 	"io"
 	"time"
+	"sync"
 
 	"github.com/IrineSistiana/mosdns/v5/pkg/cache"
 	"github.com/IrineSistiana/mosdns/v5/pkg/dnsutils"
@@ -57,8 +58,9 @@ var _ io.Closer = (*Selector)(nil)
 
 type Selector struct {
 	sequence.BQ
-	prefer uint16 // dns.TypeA or dns.TypeAAAA
+	prefer uint16
 
+	wg               sync.WaitGroup
 	preferTypOkCache *cache.Cache[key, bool]
 }
 
@@ -109,11 +111,13 @@ func (s *Selector) Exec(ctx context.Context, qCtx *query_context.Context, next s
 
 	shouldBlock := make(chan struct{})
 	shouldPass := make(chan struct{})
-	go func() {
-		qCtx := qCtxPreferred
-		ctx, cancel := context.WithDeadline(context.Background(), ddl)
-		defer cancel()
-		err := next.ExecNext(ctx, qCtx)
+	s.wg.Add(1)
+    go func() {
+	    defer s.wg.Done()
+	    qCtx := qCtxPreferred
+	    ctx, cancel := context.WithDeadline(context.Background(), ddl)
+	    defer cancel()
+	    err := next.ExecNext(ctx, qCtx)
 		if err != nil {
 			s.L().Warn("reference query routine err", qCtx.InfoField(), zap.Error(err))
 			close(shouldPass)
@@ -130,13 +134,15 @@ func (s *Selector) Exec(ctx context.Context, qCtx *query_context.Context, next s
 
 	// start original query goroutine
 	doneChan := make(chan error, 1)
-	qCtxOrg := qCtx.Copy()
-	go func() {
-		qCtx := qCtxOrg
-		ctx, cancel := context.WithDeadline(context.Background(), ddl)
-		defer cancel()
-		doneChan <- next.ExecNext(ctx, qCtx)
-	}()
+    qCtxOrg := qCtx.Copy()
+    s.wg.Add(1)
+    go func() {
+	    defer s.wg.Done()
+	    qCtx := qCtxOrg
+	    ctx, cancel := context.WithDeadline(context.Background(), ddl)
+	    defer cancel()
+	    doneChan <- next.ExecNext(ctx, qCtx)
+    }()
 
 	select {
 	case <-ctx.Done():
@@ -168,6 +174,7 @@ func (s *Selector) Exec(ctx context.Context, qCtx *query_context.Context, next s
 }
 
 func (s *Selector) Close() error {
+	s.wg.Wait()
 	s.preferTypOkCache.Close()
 	return nil
 }
