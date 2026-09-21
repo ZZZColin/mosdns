@@ -52,6 +52,9 @@ func NewMap[K Hashable, V any]() *Map[K, V] {
 // If size <=0, it's equal to NewMap().
 func NewMapCache[K Hashable, V any](size int) *Map[K, V] {
 	sizePreShard := size / MapShardSize
+	if size > 0 && sizePreShard < 1 {
+		sizePreShard = 1
+	}
 	m := new(Map[K, V])
 	for i := range m.shards {
 		m.shards[i] = newShard[K, V](sizePreShard)
@@ -162,8 +165,8 @@ func (m *shard[K, V]) len() int {
 }
 
 func (m *shard[K, V]) flush() {
-	m.l.RLock()
-	defer m.l.RUnlock()
+	m.l.Lock()
+	defer m.l.Unlock()
 	m.m = make(map[K]V)
 }
 
