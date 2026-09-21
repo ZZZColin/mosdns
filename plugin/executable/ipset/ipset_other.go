@@ -28,7 +28,7 @@ import (
 
 type ipSetPlugin struct{}
 
-func newIpSetPlugin(_ *Args) (*ipSetPlugin, error) {
+func newIpSetPlugin(_ *Args, _ *zap.Logger) (*ipSetPlugin, error) {
 	return &ipSetPlugin{}, nil
 }
 
