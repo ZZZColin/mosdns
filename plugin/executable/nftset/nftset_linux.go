@@ -25,6 +25,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"go.uber.org/zap"
 
 	"github.com/IrineSistiana/mosdns/v5/pkg/nftset_utils"
 	"github.com/IrineSistiana/mosdns/v5/pkg/query_context"
@@ -37,9 +38,10 @@ type nftSetPlugin struct {
 	args      *Args
 	v4Handler *nftset_utils.NftSetHandler
 	v6Handler *nftset_utils.NftSetHandler
+	logger    *zap.Logger
 }
 
-func newNftSetPlugin(args *Args) (*nftSetPlugin, error) {
+func newNftSetPlugin(args *Args, logger *zap.Logger) (*nftSetPlugin, error) {
 	utils.SetDefaultUnsignNum(&args.IPv4.Mask, 24)
 	utils.SetDefaultUnsignNum(&args.IPv6.Mask, 48)
 	if m := args.IPv4.Mask; m > 32 {
@@ -49,9 +51,10 @@ func newNftSetPlugin(args *Args) (*nftSetPlugin, error) {
 		return nil, fmt.Errorf("invalid ipv6 mask %d", m)
 	}
 
-	p := &nftSetPlugin{
-		args: args,
+	if logger == nil {
+		logger = zap.NewNop()
 	}
+	p := &nftSetPlugin{args: args, logger: logger}
 
 	newHandler := func(sa SetArgs) (*nftset_utils.NftSetHandler, error) {
 		if !(len(sa.Table) > 0 && len(sa.TableFamily) > 0 && len(sa.Set) > 0) {
@@ -84,7 +87,7 @@ func (p *nftSetPlugin) Exec(_ context.Context, qCtx *query_context.Context) erro
 	r := qCtx.R()
 	if r != nil {
 		if err := p.addElems(r); err != nil {
-			return fmt.Errorf("nftable: %w", err)
+			p.logger.Warn("failed to add nftset entry", zap.Error(err))
 		}
 	}
 	return nil
