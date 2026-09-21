@@ -40,7 +40,7 @@ func QuickSetup(_ sequence.BQ, s string) (sequence.Matcher, error) {
 		k = ss[0]
 	case 2:
 		k = ss[0]
-		k = ss[1]
+		v = ss[1]
 	default:
 		return nil, fmt.Errorf("invalid arg number %d", len(ss))
 	}
