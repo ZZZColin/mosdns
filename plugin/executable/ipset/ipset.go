@@ -43,7 +43,7 @@ var _ sequence.Executable = (*ipSetPlugin)(nil)
 
 // QuickSetup format: [set_name,{inet|inet6},mask] *2
 // e.g. "my_set,inet,24 my_set6,inet6,48"
-func QuickSetup(_ sequence.BQ, s string) (any, error) {
+func QuickSetup(bq sequence.BQ, s string) (any, error) {
 	fs := strings.Fields(s)
 	if len(fs) > 2 {
 		return nil, fmt.Errorf("expect no more than 2 fields, got %d", len(fs))
@@ -71,5 +71,5 @@ func QuickSetup(_ sequence.BQ, s string) (any, error) {
 			return nil, fmt.Errorf("invalid set family, %s", ss[0])
 		}
 	}
-	return newIpSetPlugin(args)
+	return newIpSetPlugin(args, bq.L())
 }
