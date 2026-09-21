@@ -103,8 +103,8 @@ func hex2byte(c byte) (byte, bool) {
 	switch {
 	case '0' <= c && c <= '9':
 		b = c - '0'
-	case 'a' <= lower(c) && lower(c) <= 'z':
-		b = lower(c) - 'a' + 10
+	case 'a' <= lower(c) && lower(c) <= 'f':
+	    b = lower(c) - 'a' + 10
 	default:
 		return 0, false
 	}
