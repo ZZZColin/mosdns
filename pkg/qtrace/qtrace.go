@@ -19,53 +19,73 @@ import (
 // Step describes one node (one "- matches / exec" rule) that a sequence
 // attempted to run.
 type Step struct {
-	Depth   int           `json:"depth"`   // nesting depth, 0 = top level sequence
-	Seq     string        `json:"seq"`     // tag of the sequence this step belongs to
-	Name    string        `json:"name"`    // plugin tag ($xxx) or type name that was run
-	Kind    string        `json:"kind"`    // "tag" or "type"
-	Skipped bool          `json:"skipped"` // true if this node's matches failed, so it did not run
-	Elapsed time.Duration `json:"-"`
-	ElapsedMS float64     `json:"elapsed_ms"`
-	Rcode   string        `json:"rcode"`             // response rcode right after this step ran, if any
-	Answer  string        `json:"answer,omitempty"`  // brief answer summary right after this step ran
-	Err     string        `json:"err,omitempty"`     // error returned by this step, if any
+	Depth     int           `json:"depth"`   // nesting depth, 0 = top level sequence
+	Seq       string        `json:"seq"`     // tag of the sequence this step belongs to
+	Name      string        `json:"name"`    // plugin tag ($xxx) or type name that was run
+	Kind      string        `json:"kind"`    // "tag" or "type"
+	Skipped   bool          `json:"skipped"` // true if this node's matches failed, so it did not run
+	Elapsed   time.Duration `json:"-"`
+	ElapsedMS float64       `json:"elapsed_ms"`
+	Rcode     string        `json:"rcode"`            // response rcode right after this step ran, if any
+	Answer    string        `json:"answer,omitempty"` // brief answer summary right after this step ran
+	Err       string        `json:"err,omitempty"`    // error returned by this step, if any
 }
 
 // Record is the full trace of one finished query.
 type Record struct {
-	ID        uint32    `json:"id"`
-	Time      time.Time `json:"time"`
-	Client    string    `json:"client,omitempty"`
-	Qname     string    `json:"qname"`
-	Qtype     string    `json:"qtype"`
+	ID        uint32        `json:"id"`
+	Time      time.Time     `json:"time"`
+	Client    string        `json:"client,omitempty"`
+	Qname     string        `json:"qname"`
+	Qtype     string        `json:"qtype"`
 	Elapsed   time.Duration `json:"-"`
-	ElapsedMS float64   `json:"elapsed_ms"`
-	Rcode     string    `json:"rcode"`
-	Answer    string    `json:"answer,omitempty"`
-	Steps     []Step    `json:"steps"`
+	ElapsedMS float64       `json:"elapsed_ms"`
+	Rcode     string        `json:"rcode"`
+	Answer    string        `json:"answer,omitempty"`
+	Steps     []Step        `json:"steps"`
 }
 
-// Recorder keeps the most recent N finished records in memory (ring buffer).
+// Recorder keeps the most recent N finished records in memory.
+//
+// It is a true fixed-size ring buffer: buf is allocated once at
+// capacity, and once full, new records overwrite the oldest slot in
+// place instead of growing/reslicing a backing array. This avoids the
+// transient ~2x-capacity memory retention that an append+reslice
+// "ring buffer" has, since dropped *Record pointers (and everything
+// they retain: Steps, Answer, Qname strings) are cleared immediately
+// instead of waiting for the backing array to be reallocated.
 type Recorder struct {
-	mu   sync.Mutex
-	cap  int
-	recs []*Record
+	mu    sync.Mutex
+	cap   int
+	buf   []*Record
+	head  int
+	count int
+
+	// hideClient, when true, makes getOrCreateState skip populating
+	// Record.Client, so /api/records never exposes querying client IPs.
+	hideClient bool
 }
 
 // NewRecorder creates a Recorder that keeps at most capacity records.
-func NewRecorder(capacity int) *Recorder {
+// hideClient controls whether Record.Client (the querying client's IP)
+// is recorded at all; pass true to keep it out of every record.
+func NewRecorder(capacity int, hideClient bool) *Recorder {
 	if capacity <= 0 {
 		capacity = 200
 	}
-	return &Recorder{cap: capacity}
+	return &Recorder{cap: capacity, buf: make([]*Record, capacity), hideClient: hideClient}
 }
 
 func (r *Recorder) add(rec *Record) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.recs = append(r.recs, rec)
-	if len(r.recs) > r.cap {
-		r.recs = r.recs[len(r.recs)-r.cap:]
+	idx := (r.head + r.count) % r.cap
+	if r.count < r.cap {
+		r.buf[idx] = rec
+		r.count++
+	} else {
+		r.buf[r.head] = rec
+		r.head = (r.head + 1) % r.cap
 	}
 }
 
@@ -74,13 +94,13 @@ func (r *Recorder) add(rec *Record) {
 func (r *Recorder) Recent(n int) []*Record {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	total := len(r.recs)
-	if n <= 0 || n > total {
-		n = total
+	if n <= 0 || n > r.count {
+		n = r.count
 	}
 	out := make([]*Record, n)
 	for i := 0; i < n; i++ {
-		out[i] = r.recs[total-1-i]
+		idx := (r.head + r.count - 1 - i) % r.cap
+		out[i] = r.buf[idx]
 	}
 	return out
 }
@@ -122,15 +142,24 @@ func activeRecorder() *Recorder {
 // further calls become no-ops so a slow, already-abandoned branch can
 // never mutate a Record that the HTTP handler may be reading/encoding
 // concurrently.
+//
+// depth is intentionally NOT a field on state: state is shared (aliased)
+// across every qCtx.Copy() of a query, but nesting depth must NOT be
+// shared across concurrently-running branches (fallback's primary vs
+// secondary, dual_selector's two branches) or their trace indentation
+// corrupts each other. depth is instead stored directly in qCtx's own
+// kv map (see depthKey below); query_context.Context.CopyTo's copyMap
+// gives every qCtx.Copy() its own independent map, so a plain int value
+// re-stored there is naturally per-branch instead of shared.
 // ---------------------------------------------------------------------
 
 var stateKey = query_context.RegKey()
+var depthKey = query_context.RegKey()
 
 type state struct {
-	mu    sync.Mutex
-	rec   *Record
-	depth int
-	done  bool
+	mu   sync.Mutex
+	rec  *Record
+	done bool
 }
 
 func getOrCreateState(qCtx *query_context.Context) *state {
@@ -138,11 +167,15 @@ func getOrCreateState(qCtx *query_context.Context) *state {
 		return v.(*state)
 	}
 	q := qCtx.QQuestion()
+	client := ""
+	if r := activeRecorder(); r != nil && !r.hideClient {
+		client = clientAddrString(qCtx)
+	}
 	s := &state{
 		rec: &Record{
 			ID:     qCtx.Id(),
 			Time:   qCtx.StartTime(),
-			Client: clientAddrString(qCtx),
+			Client: client,
 			Qname:  q.Name,
 			Qtype:  dns.TypeToString[q.Qtype],
 		},
@@ -165,6 +198,17 @@ func clientAddrString(qCtx *query_context.Context) string {
 	return ""
 }
 
+func getDepth(qCtx *query_context.Context) int {
+	if v, ok := qCtx.GetValue(depthKey); ok {
+		return v.(int)
+	}
+	return 0
+}
+
+func setDepth(qCtx *query_context.Context, d int) {
+	qCtx.StoreValue(depthKey, d)
+}
+
 // EnterSeq must be called at the start of a Sequence's Exec.
 // It returns true when a global recorder is active and tracing for this
 // query has not finished yet; in that case the caller MUST defer
@@ -175,11 +219,12 @@ func EnterSeq(qCtx *query_context.Context, seqTag string) bool {
 	}
 	s := getOrCreateState(qCtx)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.done {
+	done := s.done
+	s.mu.Unlock()
+	if done {
 		return false
 	}
-	s.depth++
+	setDepth(qCtx, getDepth(qCtx)+1)
 	return true
 }
 
@@ -191,15 +236,9 @@ func LeaveSeq(qCtx *query_context.Context) {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	if s.done {
-		s.mu.Unlock()
-		return
-	}
-	s.depth--
-	finalize := s.depth <= 0
-	s.mu.Unlock()
-	if finalize {
+	d := getDepth(qCtx) - 1
+	setDepth(qCtx, d)
+	if d <= 0 {
 		finish(qCtx, s)
 	}
 }
@@ -262,12 +301,77 @@ func RecordStep(qCtx *query_context.Context, seqTag, name, kind string, skipped 
 	if s.done {
 		return
 	}
-	depth := s.depth - 1
+	depth := getDepth(qCtx) - 1
 	if depth < 0 {
 		depth = 0
 	}
 	st.Depth = depth
 	s.rec.Steps = append(s.rec.Steps, st)
+}
+
+// RecordStepStart appends a placeholder step for a RecursiveExecutable
+// node BEFORE it runs, and returns an index for RecordStepFinish.
+//
+// RecursiveExecutable nodes (jump, goto, ecs_handler, cache,
+// dual_selector's prefer_ipv4/ipv6, ...) call next.ExecNext() themselves
+// to continue the rest of the chain BEFORE their own Exec returns. If the
+// step were recorded only after Exec returns (as a plain RecordStep call
+// would), every step the node triggers downstream would already be in
+// Steps by the time this node's own step is appended, so the trace would
+// show this node's step AFTER the steps it caused - backwards from what
+// actually happened. Reserving the slot up front fixes the ordering.
+//
+// This does NOT fix elapsed-time double counting: since the node's Exec
+// call structurally wraps the rest of the chain, elapsed here still
+// includes all downstream execution time. That is inherent to how
+// RecursiveExecutable works and cannot be separated without changing
+// every RecursiveExecutable implementation to report its own vs.
+// downstream time itself.
+//
+// A negative returned index means tracing is inactive; pass it to
+// RecordStepFinish unchanged, which will then no-op.
+func RecordStepStart(qCtx *query_context.Context, seqTag, name, kind string) int {
+	s := getState(qCtx)
+	if s == nil {
+		return -1
+	}
+	depth := getDepth(qCtx) - 1
+	if depth < 0 {
+		depth = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done {
+		return -1
+	}
+	s.rec.Steps = append(s.rec.Steps, Step{Seq: seqTag, Name: name, Kind: kind, Depth: depth})
+	return len(s.rec.Steps) - 1
+}
+
+// RecordStepFinish fills in the outcome of a step previously created by
+// RecordStepStart, in place, without moving its position in Steps.
+func RecordStepFinish(qCtx *query_context.Context, idx int, elapsed time.Duration, err error) {
+	if idx < 0 {
+		return
+	}
+	s := getState(qCtx)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || idx >= len(s.rec.Steps) {
+		return
+	}
+	st := &s.rec.Steps[idx]
+	st.Elapsed = elapsed
+	st.ElapsedMS = ms(elapsed)
+	if err != nil {
+		st.Err = err.Error()
+	} else if resp := qCtx.R(); resp != nil {
+		st.Rcode = rcodeString(resp.Rcode)
+		st.Answer = summarizeAnswer(resp)
+	}
 }
 
 func ms(d time.Duration) float64 {
