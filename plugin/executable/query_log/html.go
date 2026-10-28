@@ -4,6 +4,12 @@ package query_log
 // and /api/upstreams and renders them as an upstream summary table plus a
 // simple, collapsible timeline. No build step, no external dependencies,
 // so it works fine on a NAS with no internet access.
+//
+// query_log: renderStep now recurses into st.children (see pkg/qtrace's
+// Step.Children) so a concurrent branch's own steps (fallback's primary/
+// secondary, dual_selector's reference_check/original_query) render as
+// one nested block under that branch's marker row, instead of being
+// flattened into the same list as everything else.
 const indexHTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -18,6 +24,7 @@ const indexHTML = `<!DOCTYPE html>
     --muted: #888;
     --bg: #fafafa;
     --line: #e2e2e2;
+    --branch: #7b5fc7;
   }
   * { box-sizing: border-box; }
   body {
@@ -52,6 +59,8 @@ const indexHTML = `<!DOCTYPE html>
   .step .name { font-weight:600; }
   .step.skipped { color:#bbb; }
   .step .step-elapsed { color:var(--muted); margin-left:auto; flex-shrink:0; }
+  .step.branch { border-left:2px solid var(--branch); padding-left:4px; margin-left:-6px; }
+  .step.branch .name { color:var(--branch); }
   .empty { color:var(--muted); font-size:13px; padding:24px; text-align:center; }
   .upstreams { background:#fff; border:1px solid var(--line); border-radius:6px; overflow-x:auto; }
   .upstreams table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -91,9 +100,15 @@ function fmtTime(t) {
   var d = new Date(t);
   return d.toLocaleTimeString('zh-CN', {hour12:false});
 }
-function renderStep(st) {
-  var indent = 14 + st.depth * 16;
-  var cls = st.skipped ? "step skipped" : "step";
+// branchLevel counts how many levels of qtrace.Step.Children we have
+// recursed into; it adds its own indent on top of the step's own
+// "depth" field, purely for display, so a branch's nested steps are
+// visibly indented under their branch marker.
+function renderStep(st, branchLevel) {
+  branchLevel = branchLevel || 0;
+  var indent = 14 + st.depth * 16 + branchLevel * 16;
+  var hasChildren = st.children && st.children.length > 0;
+  var cls = "step" + (st.skipped ? " skipped" : "") + (hasChildren ? " branch" : "");
   var mid;
   if (st.skipped) {
     mid = "未命中，跳过";
@@ -106,19 +121,25 @@ function renderStep(st) {
     mid = "已执行";
   }
   var seqLabel = st.seq ? '<span class="seq">' + esc(st.seq) + '</span><span class="arrow"> › </span>' : "";
-  return '<div class="' + cls + '" style="padding-left:' + indent + 'px">' +
+  var html = '<div class="' + cls + '" style="padding-left:' + indent + 'px">' +
            seqLabel +
            '<span class="name">' + esc(st.name || st.kind) + '</span>' +
            '<span class="arrow">—</span>' +
            '<span>' + mid + '</span>' +
            '<span class="step-elapsed">' + st.elapsed_ms.toFixed(1) + 'ms</span>' +
          '</div>';
+  if (hasChildren) {
+    for (var i = 0; i < st.children.length; i++) {
+      html += renderStep(st.children[i], branchLevel + 1);
+    }
+  }
+  return html;
 }
 function renderRecord(r) {
   var rc = rcodeClass(r.rcode);
   var details = document.createElement('details');
   details.className = 'rec';
-  var stepsHtml = (r.steps || []).map(renderStep).join('');
+  var stepsHtml = (r.steps || []).map(function(st) { return renderStep(st, 0); }).join('');
   details.innerHTML =
     '<summary>' +
       '<span class="time">' + fmtTime(r.time) + '</span>' +
