@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/IrineSistiana/mosdns/v5/pkg/pool"
+	"github.com/IrineSistiana/mosdns/v5/pkg/qtrace"
 	"github.com/IrineSistiana/mosdns/v5/pkg/upstream"
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,6 +35,7 @@ type upstreamWrapper struct {
 	idx             int
 	u               upstream.Upstream
 	cfg             UpstreamConfig
+	pluginTag       string
 	queryTotal      prometheus.Counter
 	errTotal        prometheus.Counter
 	thread          prometheus.Gauge
@@ -41,6 +43,10 @@ type upstreamWrapper struct {
 
 	connOpened prometheus.Counter
 	connClosed prometheus.Counter
+
+	// stat feeds the query_log web UI. It is set by attachStat once the
+	// upstream has been created successfully.
+	stat *qtrace.UpstreamStat
 }
 
 func (uw *upstreamWrapper) OnEvent(typ upstream.Event) {
@@ -57,7 +63,8 @@ func (uw *upstreamWrapper) OnEvent(typ upstream.Event) {
 func newWrapper(idx int, cfg UpstreamConfig, pluginTag string) *upstreamWrapper {
 	lb := map[string]string{"upstream": cfg.Tag, "tag": pluginTag}
 	return &upstreamWrapper{
-		cfg: cfg,
+		cfg:       cfg,
+		pluginTag: pluginTag,
 		queryTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name:        "query_total",
 			Help:        "The total number of queries processed by this upstream",
@@ -93,6 +100,12 @@ func newWrapper(idx int, cfg UpstreamConfig, pluginTag string) *upstreamWrapper 
 	}
 }
 
+// attachStat registers this upstream with the query_log web UI.
+// Call it once, after uw.u has been set.
+func (uw *upstreamWrapper) attachStat() {
+	uw.stat = qtrace.RegisterUpstream(uw.pluginTag, uw.name(), uw.cfg.Addr)
+}
+
 func (uw *upstreamWrapper) registerMetricsTo(r prometheus.Registerer) error {
 	for _, collector := range [...]prometheus.Collector{
 		uw.queryTotal,
@@ -120,6 +133,9 @@ func (uw *upstreamWrapper) name() string {
 
 func (uw *upstreamWrapper) ExchangeContext(ctx context.Context, m []byte) (*[]byte, error) {
 	uw.queryTotal.Inc()
+	if uw.stat != nil {
+		uw.stat.IncQuery()
+	}
 
 	start := time.Now()
 	uw.thread.Inc()
@@ -128,6 +144,9 @@ func (uw *upstreamWrapper) ExchangeContext(ctx context.Context, m []byte) (*[]by
 
 	if err != nil {
 		uw.errTotal.Inc()
+		if uw.stat != nil {
+			uw.stat.IncError()
+		}
 	} else {
 		uw.responseLatency.Observe(float64(time.Since(start).Milliseconds()))
 	}
@@ -135,6 +154,7 @@ func (uw *upstreamWrapper) ExchangeContext(ctx context.Context, m []byte) (*[]by
 }
 
 func (uw *upstreamWrapper) Close() error {
+	qtrace.UnregisterUpstream(uw.stat)
 	return uw.u.Close()
 }
 

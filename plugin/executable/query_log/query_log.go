@@ -5,7 +5,8 @@
 // query processed by every `sequence` plugin (main, primary_seq, etc.),
 // and serves a small built-in web page showing, for each query, which
 // tag/type ran, what it returned, and what ran next - all the way to
-// the final answer.
+// the final answer. The page also lists every configured forward upstream
+// together with how many queries each one has handled.
 //
 // Example config:
 //
@@ -16,7 +17,6 @@
 //	    max_records: 300
 //	    username: "admin"      # optional, leave both blank to disable auth
 //	    password: "change-me"  # optional
-//	    hide_client_ip: false  # optional, set true to omit client IPs from records
 package query_log
 
 import (
@@ -52,11 +52,6 @@ type Args struct {
 	// (not recommended if listen is reachable from outside your LAN).
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
-
-	// HideClientIP omits the querying client's IP from every record, so
-	// /api/records and the web page never expose which device queried
-	// which domain. Default false.
-	HideClientIP bool `yaml:"hide_client_ip"`
 }
 
 type QueryLog struct {
@@ -71,7 +66,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 		a.Listen = ":9092"
 	}
 
-	rec := qtrace.NewRecorder(a.MaxRecords, a.HideClientIP)
+	rec := qtrace.NewRecorder(a.MaxRecords)
 	if !qtrace.SetGlobalRecorder(rec) {
 		return nil, fmt.Errorf("query_log: a query_log plugin is already running, only one instance is supported")
 	}
@@ -87,6 +82,7 @@ func Init(bp *coremain.BP, args any) (any, error) {
 	mux.HandleFunc("/api/records", func(w http.ResponseWriter, r *http.Request) {
 		handleAPIRecords(w, r, rec)
 	})
+	mux.HandleFunc("/api/upstreams", handleAPIUpstreams)
 
 	var handler http.Handler = mux
 	if len(a.Username) > 0 || len(a.Password) > 0 {
@@ -157,5 +153,15 @@ func handleAPIRecords(w http.ResponseWriter, r *http.Request, rec *qtrace.Record
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"records": rec.Recent(n),
+	})
+}
+
+// handleAPIUpstreams returns every forward upstream currently configured,
+// with the number of queries (and failures) each one has handled since
+// it was created (i.e. since startup or the last config reload).
+func handleAPIUpstreams(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"upstreams": qtrace.SnapshotUpstreams(),
 	})
 }
