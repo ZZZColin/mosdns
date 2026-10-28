@@ -177,6 +177,7 @@ func NewForward(args *Args, opt Opts) (*Forward, error) {
 			return nil, fmt.Errorf("failed to init upstream #%d: %w", i, err)
 		}
 		uw.u = u
+		uw.attachStat()
 		f.us = append(f.us, uw)
 
 		if len(c.Tag) > 0 {
